@@ -3,8 +3,11 @@
 (define-constant ERR-INVALID-PROVIDER (err u102))
 (define-constant ERR-NO-CONSENT (err u103))
 (define-constant ERR-ALREADY-EXISTS (err u104))
+(define-constant ACCESS-SUCCESS "SUCCESS")
+(define-constant ACCESS-DENIED "DENIED")
 
 (define-data-var contract-owner principal tx-sender)
+(define-data-var audit-log-counter uint u0)
 
 (define-map patients 
   principal 
@@ -45,6 +48,18 @@
     data-hash: (string-ascii 64),
     timestamp: uint,
     description: (string-ascii 100)
+  }
+)
+
+(define-map audit-logs
+  uint
+  {
+    patient: principal,
+    provider: principal,
+    action: (string-ascii 20),
+    status: (string-ascii 10),
+    timestamp: uint,
+    record-id: (optional uint)
   }
 )
 
@@ -134,11 +149,69 @@
   (map-get? consent-records {patient: patient, provider: provider})
 )
 
+(define-private (log-audit-entry (patient principal) (provider principal) (action (string-ascii 20)) (status (string-ascii 10)) (record-id (optional uint)))
+  (let ((log-id (+ (var-get audit-log-counter) u1)))
+    (var-set audit-log-counter log-id)
+    (map-set audit-logs log-id {
+      patient: patient,
+      provider: provider,
+      action: action,
+      status: status,
+      timestamp: stacks-block-height,
+      record-id: record-id
+    })
+    log-id
+  )
+)
+
+(define-public (access-medical-record (patient principal) (record-id uint))
+  (let ((caller tx-sender)
+        (consent (map-get? consent-records {patient: patient, provider: caller})))
+    (match consent
+      consent-data 
+        (if (and (get granted consent-data) (> (get expiry consent-data) stacks-block-height))
+          (let ((log-id (log-audit-entry patient caller "RECORD_ACCESS" ACCESS-SUCCESS (some record-id))))
+            (ok (map-get? medical-records {patient: patient, record-id: record-id}))
+          )
+          (let ((log-id (log-audit-entry patient caller "RECORD_ACCESS" ACCESS-DENIED (some record-id))))
+            ERR-NO-CONSENT
+          )
+        )
+      (let ((log-id (log-audit-entry patient caller "RECORD_ACCESS" ACCESS-DENIED (some record-id))))
+        ERR-NO-CONSENT
+      )
+    )
+  )
+)
+
 (define-read-only (get-medical-record (patient principal) (record-id uint))
   (let ((caller tx-sender)
         (consent (unwrap! (map-get? consent-records {patient: patient, provider: caller}) ERR-NO-CONSENT)))
     (asserts! (get granted consent) ERR-NO-CONSENT)
     (asserts! (> (get expiry consent) stacks-block-height) ERR-NO-CONSENT)
     (ok (map-get? medical-records {patient: patient, record-id: record-id}))
+  )
+)
+
+(define-read-only (get-audit-log (log-id uint))
+  (map-get? audit-logs log-id)
+)
+
+(define-read-only (get-patient-audit-logs (patient principal) (start-id uint) (end-id uint))
+  (let ((logs (list)))
+    (fold check-patient-log (unwrap-panic (as-max-len? (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) u10)) logs)
+  )
+)
+
+(define-private (check-patient-log (id uint) (acc (list 10 (optional {patient: principal, provider: principal, action: (string-ascii 20), status: (string-ascii 10), timestamp: uint, record-id: (optional uint)}))))
+  (let ((log-entry (map-get? audit-logs id)))
+    (match log-entry
+      entry 
+        (if (is-eq (get patient entry) tx-sender)
+          (unwrap-panic (as-max-len? (append acc (some entry)) u10))
+          acc
+        )
+      acc
+    )
   )
 )
