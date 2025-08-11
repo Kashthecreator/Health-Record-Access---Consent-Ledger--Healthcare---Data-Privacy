@@ -3,11 +3,15 @@
 (define-constant ERR-INVALID-PROVIDER (err u102))
 (define-constant ERR-NO-CONSENT (err u103))
 (define-constant ERR-ALREADY-EXISTS (err u104))
+(define-constant ERR-EMERGENCY-EXPIRED (err u105))
+(define-constant ERR-INVALID-JUSTIFICATION (err u106))
 (define-constant ACCESS-SUCCESS "SUCCESS")
 (define-constant ACCESS-DENIED "DENIED")
+(define-constant EMERGENCY-DURATION u144)
 
 (define-data-var contract-owner principal tx-sender)
 (define-data-var audit-log-counter uint u0)
+(define-data-var emergency-counter uint u0)
 
 (define-map patients 
   principal 
@@ -60,6 +64,18 @@
     status: (string-ascii 10),
     timestamp: uint,
     record-id: (optional uint)
+  }
+)
+
+(define-map emergency-access
+  uint
+  {
+    provider: principal,
+    patient: principal,
+    issued: uint,
+    expires: uint,
+    justification: (optional (string-ascii 200)),
+    justified: bool
   }
 )
 
@@ -212,6 +228,66 @@
           acc
         )
       acc
+    )
+  )
+)
+
+(define-public (request-emergency-access (patient principal))
+  (let ((caller tx-sender)
+        (emergency-id (+ (var-get emergency-counter) u1)))
+    (asserts! (is-some (map-get? healthcare-providers caller)) ERR-INVALID-PROVIDER)
+    (asserts! (is-some (map-get? patients patient)) ERR-INVALID-PATIENT)
+    (var-set emergency-counter emergency-id)
+    (ok (map-set emergency-access emergency-id {
+      provider: caller,
+      patient: patient,
+      issued: stacks-block-height,
+      expires: (+ stacks-block-height EMERGENCY-DURATION),
+      justification: none,
+      justified: false
+    }))
+  )
+)
+
+(define-public (justify-emergency-access (emergency-id uint) (justification (string-ascii 200)))
+  (let ((caller tx-sender)
+        (emergency (unwrap! (map-get? emergency-access emergency-id) ERR-NOT-AUTHORIZED)))
+    (asserts! (is-eq caller (get provider emergency)) ERR-NOT-AUTHORIZED)
+    (asserts! (> (len justification) u10) ERR-INVALID-JUSTIFICATION)
+    (ok (map-set emergency-access emergency-id 
+      (merge emergency {
+        justification: (some justification),
+        justified: true
+      })
+    ))
+  )
+)
+
+(define-public (emergency-access-record (patient principal) (record-id uint) (emergency-id uint))
+  (let ((caller tx-sender)
+        (emergency (unwrap! (map-get? emergency-access emergency-id) ERR-NOT-AUTHORIZED)))
+    (asserts! (is-eq caller (get provider emergency)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-eq patient (get patient emergency)) ERR-INVALID-PATIENT)
+    (asserts! (> (get expires emergency) stacks-block-height) ERR-EMERGENCY-EXPIRED)
+    (let ((log-id (log-audit-entry patient caller "EMERGENCY_ACCESS" ACCESS-SUCCESS (some record-id))))
+      (ok (map-get? medical-records {patient: patient, record-id: record-id}))
+    )
+  )
+)
+
+(define-read-only (get-emergency-access (emergency-id uint))
+  (map-get? emergency-access emergency-id)
+)
+
+(define-read-only (check-emergency-validity (emergency-id uint))
+  (let ((emergency (map-get? emergency-access emergency-id)))
+    (match emergency
+      emergency-data
+        (and 
+          (> (get expires emergency-data) stacks-block-height)
+          (get justified emergency-data)
+        )
+      false
     )
   )
 )
