@@ -5,6 +5,8 @@
 (define-constant ERR-ALREADY-EXISTS (err u104))
 (define-constant ERR-EMERGENCY-EXPIRED (err u105))
 (define-constant ERR-INVALID-JUSTIFICATION (err u106))
+(define-constant ERR-INVALID-DELEGATE (err u107))
+(define-constant ERR-DELEGATION-EXPIRED (err u108))
 (define-constant ACCESS-SUCCESS "SUCCESS")
 (define-constant ACCESS-DENIED "DENIED")
 (define-constant EMERGENCY-DURATION u144)
@@ -79,12 +81,35 @@
   }
 )
 
+(define-map delegations
+  {
+    patient: principal,
+    delegate: principal
+  }
+  {
+    granted: uint,
+    expires: uint,
+    can-consent: bool,
+    can-access: bool,
+    active: bool
+  }
+)
+
 (define-public (register-patient (name (string-ascii 50)))
   (let ((caller tx-sender))
     (asserts! (is-none (map-get? patients caller)) ERR-ALREADY-EXISTS)
     (ok (map-set patients caller {
       name: name,
       active: true
+    }))
+  )
+)
+(define-public (update-patient-info (new-name (string-ascii 50)) (active bool))
+  (let ((caller tx-sender))
+    (asserts! (is-some (map-get? patients caller)) ERR-INVALID-PATIENT)
+    (ok (map-set patients caller {
+      name: new-name,
+      active: active
     }))
   )
 )
@@ -286,6 +311,79 @@
         (and 
           (> (get expires emergency-data) stacks-block-height)
           (get justified emergency-data)
+        )
+      false
+    )
+  )
+)
+
+(define-public (delegate-access (delegate principal) (expires uint) (can-consent bool) (can-access bool))
+  (let ((caller tx-sender))
+    (asserts! (is-some (map-get? patients caller)) ERR-INVALID-PATIENT)
+    (asserts! (not (is-eq caller delegate)) ERR-INVALID-DELEGATE)
+    (asserts! (> expires stacks-block-height) ERR-DELEGATION-EXPIRED)
+    (ok (map-set delegations {patient: caller, delegate: delegate} {
+      granted: stacks-block-height,
+      expires: expires,
+      can-consent: can-consent,
+      can-access: can-access,
+      active: true
+    }))
+  )
+)
+
+(define-public (revoke-delegation (delegate principal))
+  (let ((caller tx-sender))
+    (asserts! (is-some (map-get? patients caller)) ERR-INVALID-PATIENT)
+    (let ((delegation (unwrap! (map-get? delegations {patient: caller, delegate: delegate}) ERR-INVALID-DELEGATE)))
+      (ok (map-set delegations {patient: caller, delegate: delegate}
+        (merge delegation {active: false})
+      ))
+    )
+  )
+)
+
+(define-public (delegate-grant-consent (patient principal) (provider principal) (expiry uint))
+  (let ((caller tx-sender)
+        (delegation (unwrap! (map-get? delegations {patient: patient, delegate: caller}) ERR-INVALID-DELEGATE)))
+    (asserts! (get active delegation) ERR-INVALID-DELEGATE)
+    (asserts! (> (get expires delegation) stacks-block-height) ERR-DELEGATION-EXPIRED)
+    (asserts! (get can-consent delegation) ERR-NOT-AUTHORIZED)
+    (asserts! (is-some (map-get? healthcare-providers provider)) ERR-INVALID-PROVIDER)
+    (ok (map-set consent-records 
+      {patient: patient, provider: provider}
+      {
+        granted: true,
+        timestamp: stacks-block-height,
+        expiry: expiry
+      }
+    ))
+  )
+)
+
+(define-public (delegate-access-record (patient principal) (record-id uint))
+  (let ((caller tx-sender)
+        (delegation (unwrap! (map-get? delegations {patient: patient, delegate: caller}) ERR-INVALID-DELEGATE)))
+    (asserts! (get active delegation) ERR-INVALID-DELEGATE)
+    (asserts! (> (get expires delegation) stacks-block-height) ERR-DELEGATION-EXPIRED)
+    (asserts! (get can-access delegation) ERR-NOT-AUTHORIZED)
+    (let ((log-id (log-audit-entry patient caller "DELEGATE_ACCESS" ACCESS-SUCCESS (some record-id))))
+      (ok (map-get? medical-records {patient: patient, record-id: record-id}))
+    )
+  )
+)
+
+(define-read-only (get-delegation (patient principal) (delegate principal))
+  (map-get? delegations {patient: patient, delegate: delegate})
+)
+
+(define-read-only (check-delegation-validity (patient principal) (delegate principal))
+  (let ((delegation (map-get? delegations {patient: patient, delegate: delegate})))
+    (match delegation
+      delegation-data
+        (and 
+          (get active delegation-data)
+          (> (get expires delegation-data) stacks-block-height)
         )
       false
     )
