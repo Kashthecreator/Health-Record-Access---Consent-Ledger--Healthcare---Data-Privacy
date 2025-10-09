@@ -95,6 +95,18 @@
   }
 )
 
+(define-map shared-records
+  {
+    patient: principal,
+    record-id: uint,
+    third-party: principal
+  }
+  {
+    shared: bool,
+    timestamp: uint
+  }
+)
+
 (define-public (register-patient (name (string-ascii 50)))
   (let ((caller tx-sender))
     (asserts! (is-none (map-get? patients caller)) ERR-ALREADY-EXISTS)
@@ -381,11 +393,38 @@
   (let ((delegation (map-get? delegations {patient: patient, delegate: delegate})))
     (match delegation
       delegation-data
-        (and 
+        (and
           (get active delegation-data)
           (> (get expires delegation-data) stacks-block-height)
         )
       false
+    )
+  )
+)
+
+(define-public (share-record-with-third-party (third-party principal) (record-id uint))
+  (let ((caller tx-sender))
+    (asserts! (is-some (map-get? patients caller)) ERR-INVALID-PATIENT)
+    (asserts! (is-some (map-get? medical-records {patient: caller, record-id: record-id})) ERR-NOT-AUTHORIZED)
+    (let ((log-id (log-audit-entry caller third-party "SHARE_RECORD" ACCESS-SUCCESS (some record-id))))
+      (ok (map-set shared-records {patient: caller, record-id: record-id, third-party: third-party} {
+        shared: true,
+        timestamp: stacks-block-height
+      }))
+    )
+  )
+)
+
+(define-read-only (get-shared-record (patient principal) (record-id uint))
+  (let ((caller tx-sender)
+        (share (map-get? shared-records {patient: patient, record-id: record-id, third-party: caller})))
+    (match share
+      share-data
+        (if (get shared share-data)
+          (ok (map-get? medical-records {patient: patient, record-id: record-id}))
+          ERR-NOT-AUTHORIZED
+        )
+      ERR-NOT-AUTHORIZED
     )
   )
 )
