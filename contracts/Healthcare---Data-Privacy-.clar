@@ -106,6 +106,13 @@
     timestamp: uint
   }
 )
+(define-map retention-policies
+  principal
+  {
+    retention-period: uint,
+    set-at: uint
+  }
+)
 
 (define-public (register-patient (name (string-ascii 50)))
   (let ((caller tx-sender))
@@ -425,6 +432,33 @@
           ERR-NOT-AUTHORIZED
         )
       ERR-NOT-AUTHORIZED
+    )
+  )
+)
+
+(define-public (set-retention-policy (retention-period uint))
+  (let ((caller tx-sender))
+    (asserts! (is-some (map-get? patients caller)) ERR-INVALID-PATIENT)
+    (ok (map-set retention-policies caller {
+      retention-period: retention-period,
+      set-at: stacks-block-height
+    }))
+  )
+)
+
+(define-read-only (get-retention-policy (patient principal))
+  (map-get? retention-policies patient)
+)
+
+(define-read-only (is-record-retained (patient principal) (record-id uint))
+  (let ((policy (map-get? retention-policies patient))
+        (record (map-get? medical-records {patient: patient, record-id: record-id})))
+    (match policy
+      p (match record
+          r (> (+ (get timestamp r) (get retention-period p)) stacks-block-height)
+          false
+        )
+      false
     )
   )
 )
